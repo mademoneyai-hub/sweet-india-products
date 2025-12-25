@@ -1,0 +1,126 @@
+import pandas as pd
+import requests
+from PIL import Image, ImageOps, ImageFilter, ImageEnhance 
+import io
+import os
+
+# ==========================================
+# ⚙️ SETTINGS
+# ==========================================
+GITHUB_USER = "mademoneyai-hub"
+REPO_NAME = "sweet-india-products"
+BRANCH = "main"
+
+INPUT_FILE = "final_meesho_data.xlsx"
+OUTPUT_FILE = "Final_Amazon_Upload.xlsx"
+
+# Quality Settings
+BLUR_HEIGHT = 60       # Niche ka text blur
+HD_SIZE = 1200         # Amazon HD Size (Minimum 1000px maanta hai)
+# ==========================================
+
+def make_dslr_quality(img):
+    # 1. Convert to RGB
+    if img.mode != "RGB":
+        img = img.convert("RGB")
+    
+    # 2. Auto-Rotate
+    img = ImageOps.exif_transpose(img)
+
+    # 3. 🔥 Upscale to HD (Agar photo choti hai to badi karo)
+    # Aspect Ratio maintain karte hue resize karenge
+    w, h = img.size
+    if w < HD_SIZE or h < HD_SIZE:
+        ratio = HD_SIZE / min(w, h)
+        new_size = (int(w * ratio), int(h * ratio))
+        img = img.resize(new_size, Image.Resampling.LANCZOS) # High Quality Resize
+    
+    # 4. 💧 Blur Bottom Text
+    w, h = img.size
+    # Blur height adjust karo agar photo resize hui hai
+    blur_area_h = int(BLUR_HEIGHT * (h / 500)) if h > 500 else BLUR_HEIGHT
+    
+    bottom_box = (0, h - blur_area_h, w, h)
+    bottom_strip = img.crop(bottom_box)
+    blurred_strip = bottom_strip.filter(ImageFilter.GaussianBlur(radius=15))
+    img.paste(blurred_strip, bottom_box)
+
+    # 5. ✨ DSLR Effect (Enhancement)
+    # A. Sharpness (Details chamkao)
+    enhancer = ImageEnhance.Sharpness(img)
+    img = enhancer.enhance(1.4) # 40% Zyada Sharp
+
+    # B. Contrast (Rang gehre karo)
+    enhancer = ImageEnhance.Contrast(img)
+    img = enhancer.enhance(1.2) # 20% Zyada Contrast
+
+    # C. Color (Thoda vibrant banao)
+    enhancer = ImageEnhance.Color(img)
+    img = enhancer.enhance(1.1) # 10% Zyada Rang
+
+    return img
+
+def process_images():
+    print("🚀 Script Start! Excel padh raha hu...")
+    
+    if os.path.exists(OUTPUT_FILE):
+        try: os.remove(OUTPUT_FILE)
+        except: pass
+
+    try:
+        df = pd.read_excel(INPUT_FILE)
+    except:
+        print(f"❌ Error: '{INPUT_FILE}' nahi mili!")
+        return
+
+    amazon_data = []
+    print(f"📦 Total {len(df)} products hain. Processing shuru...")
+
+    for index, row in df.iterrows():
+        sku = f"SWEET_{index+1001}"
+        print(f"   ⚙️ Processing: {sku}...")
+
+        amz_row = {
+            'item_sku': sku,
+            'brand_name': 'Sweet India',
+            'item_name': f"Premium {str(row.get('Title', 'Product'))}",
+            'external_product_id': '', 'external_product_id_type': '',
+            'feed_product_type': 'kurta', 
+            'standard_price': row.get('Price', 999),
+            'quantity': 50,
+            'update_delete': 'Update',
+            'product_description': str(row.get('Description', ''))
+        }
+
+        for i in range(1, 5):
+            col_name = f"Image {i}"
+            if col_name in row and pd.notna(row[col_name]):
+                url = row[col_name]
+                try:
+                    res = requests.get(url, timeout=10)
+                    img = Image.open(io.BytesIO(res.content))
+
+                    # 🔥 JAADU: DSLR + Blur
+                    final_img = make_dslr_quality(img)
+
+                    filename = f"{sku}_img{i}.jpg" 
+                    final_img.save(filename, quality=95, subsampling=0)
+                    
+                    gh_link = f"https://raw.githubusercontent.com/{GITHUB_USER}/{REPO_NAME}/{BRANCH}/{filename}"
+                    
+                    if i == 1: amz_row['main_image_url'] = gh_link
+                    else: amz_row[f'other_image_url{i-1}'] = gh_link
+                    
+                except Exception as e:
+                    print(f"      ⚠️ Image {i} Error: {e}")
+
+        amazon_data.append(amz_row)
+
+    pd.DataFrame(amazon_data).to_excel(OUTPUT_FILE, index=False)
+    print("\n✅ MISSION COMPLETE!")
+    print("1. Photos HD (1200px) ho gayi hain.")
+    print("2. DSLR jaisa Contrast aur Sharpness lag gaya hai.")
+    print("3. Niche ka text Blur hai (Background safe hai).")
+
+if __name__ == "__main__":
+    process_images()
