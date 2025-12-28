@@ -3,173 +3,266 @@ import requests
 from PIL import Image, ImageOps, ImageFilter, ImageEnhance
 import io
 import os
-import random
+import time
+import re 
 
 # ==========================================
-# ⚙️ SETTINGS (Yahan Changes Kiye Hain)
+# ⚙️ SETTINGS (Multi-Category Setup)
 # ==========================================
 GITHUB_USER = "mademoneyai-hub"
 REPO_NAME = "sweet-india-products"
 BRANCH = "main"
 
 INPUT_FILE = "final_meesho_data.xlsx"
-OUTPUT_FILE = "Final_Amazon_Ready_Upload.xlsx"
+OUTPUT_FILE = "Amazon_Generic_Master_Upload.xlsx"
 
-# Company Details
-MANUFACTURER_NAME = "Multi Task Enterprises"
-BRAND_NAME = "Multi Task Enterprises"  # Agar Brand Registry nahi hai to 'Generic' likhein
+# ✅ BRAND SETTING: Generic
+BRAND_NAME = "Generic" 
+MANUFACTURER = "Sweet India Enterprises" # Yahan apni firm ka naam likhein
 
-# Pricing Settings
-MY_PROFIT = 200  # Seedha 200 Rupaye Profit
-DEFAULT_WEIGHT = 450
+# 💰 PROFIT SETTING
+FIXED_PROFIT = 200  
 
-# --- AMAZON EXACT COLUMNS ---
-AMAZON_COLUMNS = [
-    'feed_product_type', 'item_sku', 'brand_name', 'external_product_id', 
-    'external_product_id_type', 'item_name', 'manufacturer', 'part_number', 
-    'standard_price', 'quantity', 'main_image_url', 'other_image_url1', 
-    'other_image_url2', 'other_image_url3', 'department_name', 'color_name', 
-    'size_name', 'material_type', 'fit_type', 'neck_style', 'pattern_type', 
-    'product_description', 'bullet_point1', 'bullet_point2', 'bullet_point3', 
-    'generic_keywords', 'country_of_origin', 'batteries_required', 
-    'are_batteries_included', 'supplier_declared_dg_hz_regulation'
-]
 # ==========================================
 
-def calculate_selling_price(making_cost, product_title):
-    try: making_cost = float(making_cost)
-    except: return 999
+# --- 1. INTELLIGENT CATEGORY DETECTOR ---
+def detect_category_and_sizes(title, desc):
+    text = (str(title) + " " + str(desc)).lower()
     
-    # Weight ka andaza
-    weight = DEFAULT_WEIGHT
-    title_lower = str(product_title).lower()
+    # --- A. CLOTHING (Kurti, Top, Dress) ---
+    if any(x in text for x in ['kurti', 'kurta', 'dress', 'top', 'tunic', 'shirt', 'gown']):
+        return {
+            'type': 'shirt',  # Amazon Feed Type
+            'is_variation': True,
+            'theme': 'size_name',
+            'sizes': ['S', 'M', 'L', 'XL', '2XL'],
+            'keywords': 'latest fashion for women, party wear, trendy design, comfort fit',
+            'material_default': 'Cotton Blend'
+        }
     
-    if any(x in title_lower for x in ['lehenga', 'jacket', 'coat', 'heavy']): weight = 900
-    elif any(x in title_lower for x in ['gown', 'anarkali']): weight = 600
+    # --- B. SHOES (Sandal, Shoe, Boot) ---
+    elif any(x in text for x in ['shoe', 'sandal', 'boot', 'slipper', 'flat', 'heel']):
+        return {
+            'type': 'shoes',
+            'is_variation': True,
+            'theme': 'size_name',
+            'sizes': ['6 UK', '7 UK', '8 UK', '9 UK'],
+            'keywords': 'comfortable walking shoes, stylish footwear, durable sole, casual wear',
+            'material_default': 'Synthetic Leather'
+        }
     
-    # Amazon Shipping Cost Logic
-    if weight <= 500: shipping = 74
-    elif weight <= 1000: shipping = 111
-    else: shipping = 153
+    # --- C. SAREE (Clothing but NO Size Variation) ---
+    elif 'saree' in text:
+        return {
+            'type': 'saree',
+            'is_variation': False, # Saree ka size nahi hota
+            'theme': '',
+            'sizes': [],
+            'keywords': 'designer saree, traditional wear, wedding saree, silk saree',
+            'material_default': 'Art Silk'
+        }
 
-    # FORMULA: Cost + Shipping + 200 Profit
-    final_price = making_cost + shipping + MY_PROFIT
-    return int(final_price)
+    # --- D. BAGS / WATCHES / OTHERS (Single Product) ---
+    else:
+        return {
+            'type': 'luggage', # Default for bags
+            'is_variation': False,
+            'theme': '',
+            'sizes': [],
+            'keywords': 'premium quality, durable material, latest style, gift item',
+            'material_default': 'High Quality Material'
+        }
 
+# --- 2. SMART DETAILS EXTRACTOR ---
+def extract_material_and_color(text, default_mat):
+    text = str(text).lower()
+    
+    # Material Scan
+    material = default_mat
+    if "rayon" in text: material = "Rayon"
+    elif "cotton" in text: material = "Cotton"
+    elif "silk" in text: material = "Silk"
+    elif "leather" in text: material = "Leather"
+    elif "canvas" in text: material = "Canvas"
+    elif "polyester" in text: material = "Polyester"
+    
+    # Color Scan
+    color = "Multicolor"
+    if "red" in text: color = "Red"
+    elif "blue" in text: color = "Blue"
+    elif "black" in text: color = "Black"
+    elif "white" in text: color = "White"
+    elif "pink" in text: color = "Pink"
+    elif "yellow" in text: color = "Yellow"
+    elif "green" in text: color = "Green"
+
+    return material, color
+
+# --- 3. PRICE CALCULATOR ---
+def calculate_price(raw_price):
+    try:
+        clean_str = str(raw_price).lower().replace('rs.', '').replace('rs', '').replace('₹', '').replace(',', '').replace(' ', '')
+        cost = float(clean_str)
+    except: return 0
+    
+    shipping = 74 
+    return int(cost + shipping + FIXED_PROFIT)
+
+# --- 4. IMAGE ENHANCER ---
 def make_dslr_quality(img):
     if img.mode != "RGB": img = img.convert("RGB")
     img = ImageOps.exif_transpose(img)
     
-    # Resize to HD (1200px)
     w, h = img.size
-    if w < 1200 or h < 1200:
-        ratio = 1200 / min(w, h)
+    target = 1000 # Amazon min requirement
+    if w < target or h < target:
+        ratio = target / min(w, h)
         img = img.resize((int(w * ratio), int(h * ratio)), Image.Resampling.LANCZOS)
     
-    # Blur Bottom
-    w, h = img.size
-    blur_h = 60
+    # Blur Bottom 10%
+    blur_h = int(h * 0.10)
     box = (0, h - blur_h, w, h)
-    blur = img.crop(box).filter(ImageFilter.GaussianBlur(radius=15))
+    blur = img.crop(box).filter(ImageFilter.GaussianBlur(radius=20))
     img.paste(blur, box)
     
-    # Enhance
     img = ImageEnhance.Sharpness(img).enhance(1.4)
-    img = ImageEnhance.Contrast(img).enhance(1.2)
-    img = ImageEnhance.Color(img).enhance(1.1)
+    img = ImageEnhance.Contrast(img).enhance(1.1)
     return img
 
-def process_images():
-    print(f"🚀 Script Start! Manufacturer: {MANUFACTURER_NAME}")
+# ==========================================
+# 🚀 MAIN PROCESSING ENGINE
+# ==========================================
+def process_multi_category():
+    print("🚀 MULTI-CATEGORY SCRIPT STARTED...")
+    print("   (Detecting: Clothes, Shoes, Sarees, Bags, etc.)")
     
-    try:
-        df = pd.read_excel(INPUT_FILE)
-    except:
-        print(f"❌ '{INPUT_FILE}' nahi mili! Folder check karein.")
-        return
+    if os.path.exists(OUTPUT_FILE): os.remove(OUTPUT_FILE)
+    try: df = pd.read_excel(INPUT_FILE)
+    except: print("❌ Excel File nahi mili!"); return
 
-    amazon_data = []
+    amazon_rows = []
+    batch_time = int(time.time())
 
     for index, row in df.iterrows():
-        # --- 1. UNIQUE SKU LOGIC ---
-        # 'MTE' = Multi Task Enterprises
-        # Index use karne se duplicate nahi hoga
-        sku = f"MTE_KURTA_{index+1001}" 
+        # --- 1. DATA GATHERING ---
+        raw_title = str(row.get('Title', 'Generic Product'))
+        raw_desc = str(row.get('Description', ''))
+        my_price = calculate_price(row.get('Price', 0))
         
-        # --- 2. TITLE & DESC (SAME COPY) ---
-        title = str(row.get('Title', '')) 
-        if title == 'nan': title = "Ethnic Wear For Women"
+        # --- 2. 🧠 AI DECISION (Category kya hai?) ---
+        cat_info = detect_category_and_sizes(raw_title, raw_desc)
         
-        desc = str(row.get('Description', ''))
-        if desc == 'nan': desc = f"High quality {title} from {MANUFACTURER_NAME}."
-
-        # --- 3. PRICE (+200 Profit) ---
-        price = calculate_selling_price(row.get('Price', 0), title)
-
-        print(f"   ⚙️ Processing: {sku} | SP: {price}")
-
-        # --- FILL AMAZON ROW ---
-        amz_row = {col: '' for col in AMAZON_COLUMNS}
-
-        amz_row['feed_product_type'] = 'kurta' 
-        amz_row['item_sku'] = sku
-        amz_row['brand_name'] = BRAND_NAME
-        amz_row['manufacturer'] = MANUFACTURER_NAME # Ye manufacturing unit ka naam hai
-        amz_row['item_name'] = title  # Same copy
+        # --- 3. DETAILS EXTRACTION ---
+        final_mat, final_color = extract_material_and_color(raw_desc, cat_info['material_default'])
         
-        amz_row['external_product_id'] = '' 
-        amz_row['external_product_id_type'] = '' 
+        # SEO Text Generation
+        seo_title = f"{BRAND_NAME} {raw_title} | {final_mat} | {final_color} | {cat_info['keywords'].split(',')[0]}"
+        final_bullets = [
+            f"MATERIAL: High quality {final_mat}, designed for durability and comfort.",
+            f"STYLE: Latest trendy design suitable for all occasions.",
+            f"QUALITY: Premium finish from {BRAND_NAME}.",
+            "CARE: Easy to clean and maintain.",
+            "MADE IN INDIA: Proudly manufactured in India."
+        ]
 
-        amz_row['standard_price'] = price
-        amz_row['quantity'] = 100 # Stock thoda zyada rakha taaki OOS na ho
-        amz_row['department_name'] = 'Women'
-        amz_row['color_name'] = 'Multicolor'
-        amz_row['size_name'] = 'Free Size'
-        amz_row['material_type'] = 'Cotton Blend'
-        amz_row['product_description'] = desc # Same Copy
-        
-        # Bullet Points
-        amz_row['bullet_point1'] = f"Original Product from {MANUFACTURER_NAME}."
-        amz_row['bullet_point2'] = "Premium Quality Fabric, Comfortable to wear."
-        amz_row['bullet_point3'] = "Ideal for Casual, Party & Festive wear."
-        
-        amz_row['country_of_origin'] = 'India'
-        amz_row['batteries_required'] = 'False'
-        amz_row['are_batteries_included'] = 'False'
-        amz_row['supplier_declared_dg_hz_regulation'] = 'Not Applicable'
+        # Base SKU
+        base_sku = f"GEN-{cat_info['type'][:3].upper()}-{batch_time}-{index+1}"
 
-        # --- IMAGES ---
+        # --- 4. IMAGES ---
+        image_links = []
         for i in range(1, 5):
             col_name = f"Image {i}"
             if col_name in row and pd.notna(row[col_name]):
-                url = row[col_name]
                 try:
-                    res = requests.get(url, timeout=10)
+                    res = requests.get(row[col_name], timeout=10)
                     img = Image.open(io.BytesIO(res.content))
                     final_img = make_dslr_quality(img)
-                    
-                    filename = f"{sku}_img{i}.jpg"
+                    filename = f"{base_sku}_img{i}.jpg"
                     final_img.save(filename, quality=95)
-                    
                     gh_link = f"https://raw.githubusercontent.com/{GITHUB_USER}/{REPO_NAME}/{BRANCH}/{filename}"
-                    
-                    if i == 1: amz_row['main_image_url'] = gh_link
-                    elif i == 2: amz_row['other_image_url1'] = gh_link
-                    elif i == 3: amz_row['other_image_url2'] = gh_link
-                    elif i == 4: amz_row['other_image_url3'] = gh_link
-                    
+                    image_links.append(gh_link)
                 except: pass
+        
+        main_img = image_links[0] if len(image_links) > 0 else ""
+        other_imgs = image_links[1:] + [""] * (3 - len(image_links[1:]))
 
-        amazon_data.append(amz_row)
+        # ==========================================
+        # 🟢 MODE 1: VARIATION PRODUCT (Clothes/Shoes)
+        # ==========================================
+        if cat_info['is_variation']:
+            # A. PARENT ROW
+            parent_row = {
+                'item_sku': base_sku + "-PARENT",
+                'item_name': seo_title,
+                'brand_name': BRAND_NAME,
+                'feed_product_type': cat_info['type'],
+                'update_delete': 'Update',
+                'parent_child': 'Parent',
+                'variation_theme': cat_info['theme'],
+                'department_name': 'Women' if 'women' in raw_title.lower() else 'Unisex',
+                'product_description': raw_desc if len(raw_desc) > 10 else f"Shop this {raw_title}.",
+                'bullet_point1': final_bullets[0], 'bullet_point2': final_bullets[1],
+                'bullet_point3': final_bullets[2], 'bullet_point4': final_bullets[3],
+                'bullet_point5': final_bullets[4],
+                'generic_keywords': cat_info['keywords'],
+                'main_image_url': main_img,
+                'material_type': final_mat,
+                'color_name': final_color,
+                'manufacturer': MANUFACTURER,
+            }
+            amazon_rows.append(parent_row)
 
-    # Save Excel
-    final_df = pd.DataFrame(amazon_data, columns=AMAZON_COLUMNS)
-    final_df.to_excel(OUTPUT_FILE, index=False)
+            # B. CHILD ROWS (Sizes)
+            for size in cat_info['sizes']:
+                child_row = parent_row.copy()
+                child_row['item_sku'] = f"{base_sku}-{size.replace(' ', '')}"
+                child_row['parent_child'] = 'Child'
+                child_row['relationship_type'] = 'Variation'
+                child_row['size_name'] = size
+                child_row['standard_price'] = my_price
+                child_row['quantity'] = 25
+                child_row['other_image_url1'] = other_imgs[0] if len(other_imgs) > 0 else ''
+                child_row['other_image_url2'] = other_imgs[1] if len(other_imgs) > 1 else ''
+                amazon_rows.append(child_row)
+            
+            print(f"   👕 Variation Created: {raw_title[:15]}... ({len(cat_info['sizes'])} Sizes)")
+
+        # ==========================================
+        # 🔵 MODE 2: SINGLE PRODUCT (Bag/Watch/Saree)
+        # ==========================================
+        else:
+            single_row = {
+                'item_sku': base_sku,
+                'item_name': seo_title,
+                'brand_name': BRAND_NAME,
+                'feed_product_type': cat_info['type'],
+                'update_delete': 'Update',
+                'standard_price': my_price,
+                'quantity': 50,
+                'product_description': raw_desc,
+                'bullet_point1': final_bullets[0], 'bullet_point2': final_bullets[1],
+                'bullet_point3': final_bullets[2],
+                'generic_keywords': cat_info['keywords'],
+                'main_image_url': main_img,
+                'other_image_url1': other_imgs[0] if len(other_imgs) > 0 else '',
+                'other_image_url2': other_imgs[1] if len(other_imgs) > 1 else '',
+                'material_type': final_mat,
+                'color_name': final_color,
+                'manufacturer': MANUFACTURER,
+                'department_name': 'Women'
+            }
+            amazon_rows.append(single_row)
+            print(f"   👜 Single Item Created: {raw_title[:15]}...")
+
+    # --- SAVE ---
+    df_final = pd.DataFrame(amazon_rows)
+    # Arrange columns properly
+    cols = ['feed_product_type', 'item_sku', 'brand_name', 'item_name', 'parent_child', 'variation_theme', 'size_name', 'color_name', 'standard_price', 'quantity', 'main_image_url']
+    other_cols = [c for c in df_final.columns if c not in cols]
+    df_final = df_final[cols + other_cols]
     
-    print("\n✅ MISSION COMPLETE!")
-    print(f"📂 File Saved: {OUTPUT_FILE}")
-    print(f"👉 SKU Pattern: MTE_KURTA_1001, 1002 etc. (Unique)")
-    print(f"👉 Manufacturer: {MANUFACTURER_NAME}")
+    df_final.to_excel(OUTPUT_FILE, index=False)
+    print(f"\n✅ MASTER SHEET READY: {OUTPUT_FILE}")
 
 if __name__ == "__main__":
-    process_images()
+    process_multi_category()
